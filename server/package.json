@@ -4,7 +4,8 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "start": "node --env-file=.env src/index.js",
+    "start": "node src/index.js",
+    "start:local": "node --env-file=.env src/index.js",
     "dev": "node --env-file=.env --watch src/index.js"
   },
   "dependencies": {
