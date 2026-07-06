@@ -1,4 +1,4 @@
-const AI_API_URL = import.meta.env.VITE_AI_API_URL
+const AI_API_URL = import.meta.env.VITE_AI_API_URL || 'https://escape-hint-pwa.onrender.com'
 const OLLAMA_BASE_URL = import.meta.env.VITE_OLLAMA_BASE_URL || 'http://localhost:11434'
 export const DEFAULT_MODEL = 'exaone3.5:2.4b'
 
