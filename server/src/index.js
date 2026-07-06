@@ -1,0 +1,534 @@
+import cors from 'cors'
+import express from 'express'
+import admin from 'firebase-admin'
+import { createClient } from '@libsql/client'
+
+const PORT = Number(process.env.PORT || 8080)
+const GROQ_API_KEY = process.env.GROQ_API_KEY || ''
+const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.1-8b-instant'
+const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions'
+const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || '*'
+const RATE_LIMIT_WINDOW_MS = Number(process.env.RATE_LIMIT_WINDOW_MS || 60_000)
+const RATE_LIMIT_MAX = Number(process.env.RATE_LIMIT_MAX || 30)
+
+let firestore = null
+try {
+  if (!admin.apps.length) {
+    admin.initializeApp({ credential: admin.credential.applicationDefault() })
+  }
+  firestore = admin.firestore()
+} catch {
+  console.warn('[firebase] 인증 정보 없음 — seed data fallback 사용')
+}
+const app = express()
+
+// Turso 클라이언트 (환경변수 없으면 null)
+let turso = null
+if (process.env.TURSO_DB_URL && process.env.TURSO_AUTH_TOKEN) {
+  turso = createClient({
+    url: process.env.TURSO_DB_URL,
+    authToken: process.env.TURSO_AUTH_TOKEN
+  })
+  turso.execute(`
+    CREATE TABLE IF NOT EXISTS hint_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      game_id TEXT NOT NULL,
+      stage_number INTEGER,
+      hint_level INTEGER,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `).catch(err => console.warn('[turso] 테이블 초기화 실패:', err.message))
+}
+
+app.use(cors({
+  origin: ALLOWED_ORIGIN === '*' ? true : ALLOWED_ORIGIN.split(',').map(origin => origin.trim()),
+  credentials: false
+}))
+app.use(express.json({ limit: '1mb' }))
+app.use(rateLimit)
+
+app.get('/health', async (_req, res) => {
+  res.json({
+    ok: true,
+    model: GROQ_MODEL,
+    groq: !!GROQ_API_KEY,
+    turso: turso !== null
+  })
+})
+
+app.post('/api/hints', async (req, res) => {
+  try {
+    const payload = validateHintRequest(req.body)
+    const knowledge = await loadGameKnowledge(payload.gameId)
+    const stage = findStage(knowledge, payload.stageNumber, payload.question, payload.history)
+    const hintLevel = decideHintLevel(knowledge, stage, payload.question, payload.history, payload.maxHintLevel)
+    const answer = await askGroq({ payload, knowledge, stage, hintLevel })
+
+    // Turso에 힌트 사용 기록 (비동기, 실패해도 응답에 영향 없음)
+    logHintToTurso(payload.gameId, stage?.number ?? null, hintLevel, payload.userEmail)
+
+    res.json({
+      answer,
+      hintLevel,
+      model: GROQ_MODEL,
+      matchedStage: toMatchedStage(stage),
+      source: 'groq'
+    })
+  } catch (error) {
+    const status = error.statusCode || 500
+    res.status(status).json({ error: error.message })
+  }
+})
+
+// 게임별 힌트 통계 (관리자용)
+app.get('/api/hint-stats/:gameId', async (req, res) => {
+  if (!turso) return res.status(503).json({ error: 'Turso 연동이 설정되지 않았습니다.' })
+  try {
+    const { gameId } = req.params
+    const result = await turso.execute({
+      sql: `SELECT stage_number, hint_level, COUNT(*) as count
+            FROM hint_logs WHERE game_id = ?
+            GROUP BY stage_number, hint_level
+            ORDER BY stage_number, hint_level`,
+      args: [gameId]
+    })
+    const total = await turso.execute({
+      sql: 'SELECT COUNT(*) as total FROM hint_logs WHERE game_id = ?',
+      args: [gameId]
+    })
+    res.json({
+      gameId,
+      totalHints: Number(total.rows[0].total),
+      byStage: result.rows
+    })
+  } catch (error) {
+    res.status(500).json({ error: error.message })
+  }
+})
+
+// 유저별 힌트 횟수 조회 (웹사이트 엔딩 시 호출 → 등급 산정용)
+app.get('/api/user-hints', async (req, res) => {
+  if (!turso) return res.status(503).json({ error: 'Turso 연동이 설정되지 않았습니다.' })
+  const email = String(req.query.email || '').trim().toLowerCase()
+  if (!email) return res.status(400).json({ error: 'email 파라미터가 필요합니다.' })
+
+  try {
+    const total = await turso.execute({
+      sql: 'SELECT COUNT(*) as total FROM hint_logs WHERE user_email = ?',
+      args: [email]
+    })
+    const byStage = await turso.execute({
+      sql: `SELECT stage_number, COUNT(*) as count
+            FROM hint_logs WHERE user_email = ?
+            GROUP BY stage_number ORDER BY stage_number`,
+      args: [email]
+    })
+    res.json({
+      email,
+      totalHints: Number(total.rows[0].total),
+      byStage: byStage.rows
+    })
+  } catch (error) {
+    res.status(500).json({ error: error.message })
+  }
+})
+
+app.listen(PORT, () => {
+  console.log(`[AI] listening on :${PORT}`)
+  console.log(`[AI] groq model=${GROQ_MODEL} key=${GROQ_API_KEY ? '✅' : '❌ 미설정'}`)
+  console.log(`[AI] turso=${turso ? 'connected' : 'disabled'}`)
+})
+
+function logHintToTurso(gameId, stageNumber, hintLevel, userEmail) {
+  if (!turso) return
+  turso.execute({
+    sql: 'INSERT INTO hint_logs (game_id, stage_number, hint_level, user_email) VALUES (?, ?, ?, ?)',
+    args: [gameId, stageNumber, hintLevel, userEmail ?? null]
+  }).catch(err => console.warn('[turso] 힌트 로그 저장 실패:', err.message))
+}
+
+function validateHintRequest(body) {
+  const gameId = String(body?.gameId || '').trim()
+  const question = String(body?.question || '').trim()
+  const history = Array.isArray(body?.history) ? body.history : []
+  const stageNumber = body?.stageNumber == null ? null : Number(body.stageNumber)
+  const maxHintLevel = Math.min(Number(body?.maxHintLevel || 3), 3)
+  const userEmail = body?.userEmail ? String(body.userEmail).trim().toLowerCase() : null
+
+  if (!gameId) throw httpError(400, 'gameId가 필요합니다.')
+  if (!question) throw httpError(400, 'question이 필요합니다.')
+  if (Number.isNaN(stageNumber)) throw httpError(400, 'stageNumber 형식이 올바르지 않습니다.')
+
+  return {
+    gameId,
+    question,
+    history: history
+      .filter(item => item && (item.role === 'user' || item.role === 'assistant'))
+      .map(item => ({
+        role: item.role,
+        content: String(item.content || '').slice(0, 800)
+      }))
+      .slice(-8),
+    stageNumber,
+    maxHintLevel,
+    userEmail
+  }
+}
+
+async function loadGameKnowledge(gameId) {
+  if (firestore) {
+    try {
+      const snap = await firestore.collection('gameKnowledge').doc(gameId).get()
+      if (snap.exists) return snap.data()
+    } catch (err) {
+      console.warn('[firebase] gameKnowledge 조회 실패, seed fallback 사용:', err.message)
+    }
+  }
+  const fallback = SEED_KNOWLEDGE[gameId]
+  if (!fallback) throw httpError(404, '등록된 게임 지식이 없습니다.')
+  return fallback
+}
+
+function findStage(knowledge, stageNumber, question, history) {
+  const stages = Array.isArray(knowledge.stages) ? knowledge.stages : []
+  if (!stages.length) return null
+  if (stageNumber != null) {
+    return stages.find(stage => Number(stage.number) === Number(stageNumber)) || inferRelevantStage(stages, question, history)
+  }
+  return inferRelevantStage(stages, question, history)
+}
+
+function decideHintLevel(knowledge, stage, question, history, maxHintLevel) {
+  const stages = Array.isArray(knowledge.stages) ? knowledge.stages : []
+  const items = getConversationBeforeCurrent(history)
+
+  if (!stage) {
+    const similar = items
+      .filter(m => m.role === 'user')
+      .filter(m => similarity(question, m.content) >= 0.4)
+    return Math.min(similar.length + 1, maxHintLevel, 3)
+  }
+
+  // 같은 스테이지에 대한 어시스턴트 응답 횟수로 힌트 단계 결정
+  // → 다른 스테이지 질문 후 돌아오면 해당 스테이지의 카운트만 사용
+  let hintCount = 0
+  let lastUserIsThisStage = false
+
+  for (const msg of items) {
+    if (msg.role === 'user') {
+      const userStage = inferRelevantStage(stages, msg.content, [])
+      if (userStage !== null && Number(userStage.number) === Number(stage.number)) {
+        lastUserIsThisStage = true
+      } else {
+        hintCount = 0
+        lastUserIsThisStage = false
+      }
+    } else if (msg.role === 'assistant') {
+      if (lastUserIsThisStage) hintCount++
+      lastUserIsThisStage = false
+    }
+  }
+
+  return Math.min(hintCount + 1, maxHintLevel, 3)
+}
+
+function getConversationBeforeCurrent(history) {
+  if (!history?.length) return []
+  if (history.at(-1)?.role === 'user') return history.slice(0, -1)
+  return [...history]
+}
+
+function similarity(a, b) {
+  const aTokens = new Set(tokenize(a))
+  const bTokens = new Set(tokenize(b))
+  if (!aTokens.size || !bTokens.size) return 0
+
+  let overlap = 0
+  for (const token of aTokens) {
+    if (bTokens.has(token)) overlap += 1
+  }
+  return overlap / Math.max(aTokens.size, bTokens.size)
+}
+
+function tokenize(text) {
+  return String(text)
+    .toLowerCase()
+    .replace(/[^가-힣a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(token => token.length > 1)
+}
+
+async function askGroq({ payload, knowledge, stage, hintLevel }) {
+  if (!GROQ_API_KEY) throw httpError(500, 'GROQ_API_KEY가 설정되지 않았습니다.')
+
+  const system = buildSystemPrompt({ knowledge, stage, hintLevel })
+  const messages = [
+    { role: 'system', content: system },
+    ...getPromptHistory(payload.history, payload.question).slice(-6),
+    { role: 'user', content: payload.question }
+  ]
+
+  const response = await fetch(GROQ_API_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${GROQ_API_KEY}`
+    },
+    body: JSON.stringify({
+      model: GROQ_MODEL,
+      messages,
+      temperature: 0.55,
+      max_tokens: 512,
+      top_p: 0.9
+    })
+  })
+
+  if (!response.ok) {
+    const detail = await response.text()
+    throw httpError(502, `Groq 응답 오류: ${detail}`)
+  }
+
+  const data = await response.json()
+  const answer = data?.choices?.[0]?.message?.content?.trim()
+  if (!answer) throw httpError(502, 'Groq가 빈 응답을 반환했습니다.')
+  return answer
+}
+
+function buildSystemPrompt({ knowledge, stage, hintLevel }) {
+  const levelInstruction = {
+    1: '안내 수준 1: 확인해야 할 위치나 방향만 알려주세요. 구체적인 풀이 방법, 암호, 최종 행동은 말하지 마세요.',
+    2: '안내 수준 2: 관련 단서를 구체화하세요. 마지막 행동이나 최종 입력값은 직원이 스스로 찾게 남겨두세요.',
+    3: '안내 수준 3: 최종 행동 직전까지 안내하세요. 그래도 정확한 암호 문자열이나 최종 입력값은 직접 말하지 마세요.'
+  }[hintLevel]
+
+  return `당신은 EGCompany 시설의 익명 보안 관리 담당자입니다.
+상대방은 오늘 처음 출근한 신입 보안 관리자로, 업무를 진행하다 막혀 도움을 요청하고 있습니다.
+시설 내부 직원답게 차분하고 정확한 말투로 안내하세요.
+
+[절대 사용 금지 표현] 방탈출, 게임, 퍼즐, 정답, 힌트
+대신 다음처럼 표현하세요: '업무 절차', '시스템 안내', '확인 사항', '다음 단계'
+
+[시설]
+${knowledge.title || 'EGCompany'}
+
+[현재 담당 업무 구간]
+${stage ? `${stage.number || ''}번 업무: ${stage.title || ''}` : '미확인 (질문을 기준으로 판단)'}
+
+[해당 구간 업무 정보]
+${stage?.content || '등록된 구간 정보가 없습니다.'}
+
+[단계별 안내 내용]
+${formatHints(stage?.hints)}
+
+[안내 수준]
+${levelInstruction}
+
+[반드시 지킬 규칙]
+1. 한국어로 답변하세요.
+2. 최종 암호나 정답을 직접 제공하지 마세요.
+3. 3~5문장으로 간결하게 안내하세요.
+4. 업무와 무관한 질문에는 "해당 업무 관련 문의만 처리 가능합니다"라고 하세요.
+5. 확신할 수 없는 내용은 추측하지 말고 확인해야 할 위치를 안내하세요.
+6. 질문이 모호하면 언급된 화면 단서로 가장 가까운 업무 구간을 먼저 짚어주세요.`
+}
+
+function formatHints(hints) {
+  if (!hints || typeof hints !== 'object') return '없음'
+  return Object.entries(hints)
+    .sort(([a], [b]) => Number(a) - Number(b))
+    .map(([level, text]) => `- ${level}단계: ${text}`)
+    .join('\n')
+}
+
+function inferRelevantStage(stages, question, history = []) {
+  const currentMatch = rankStages(stages, question)[0]
+  if (currentMatch?.score > 0) return currentMatch.stage
+
+  const recentUserText = getPreviousUserTurns(history, question)
+    .slice(-2)
+    .map(item => item.content)
+    .join(' ')
+  const contextMatch = rankStages(stages, `${question} ${recentUserText}`.trim())[0]
+  return contextMatch?.score > 0 ? contextMatch.stage : null
+}
+
+function rankStages(stages, query) {
+  const tokens = tokenize(query)
+  return stages
+    .map(stage => ({
+      stage,
+      score: scoreStage(stage, tokens, query)
+    }))
+    .sort((a, b) => b.score - a.score)
+}
+
+function scoreStage(stage, tokens, query) {
+  const title = String(stage.title || '').toLowerCase()
+  const haystacks = [
+    title,
+    stage.content,
+    ...(stage.keywords || [])
+  ].map(value => String(value || '').toLowerCase())
+
+  let score = 0
+  if (hasStageNumberSignal(query, stage.number)) score += 30
+
+  for (const token of tokens) {
+    for (const haystack of haystacks) {
+      if (haystack.includes(token)) {
+        score += haystack === title ? 2 : 1
+        break
+      }
+    }
+  }
+
+  for (const rule of STAGE_MATCH_RULES) {
+    if (rule.patterns.some(pattern => pattern.test(query))) {
+      score += Number(stage.number) === rule.stageNumber ? rule.weight : 0
+    }
+  }
+
+  return score
+}
+
+function hasStageNumberSignal(query, stageNumber) {
+  const escaped = String(stageNumber).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const patterns = [
+    new RegExp(`${escaped}\\s*번`, 'i'),
+    new RegExp(`${escaped}\\s*번째`, 'i'),
+    new RegExp(`stage\\s*${escaped}`, 'i'),
+    new RegExp(`스테이지\\s*${escaped}`, 'i'),
+    new RegExp(`문제\\s*${escaped}`, 'i')
+  ]
+  return patterns.some(pattern => pattern.test(query))
+}
+
+function toMatchedStage(stage) {
+  if (!stage) return null
+  return {
+    id: stage.id,
+    number: stage.number,
+    title: stage.title
+  }
+}
+
+function getPreviousUserTurns(history, currentQuestion) {
+  return getConversationBeforeCurrent(history).filter(m => m.role === 'user')
+}
+
+function getPromptHistory(history, currentQuestion) {
+  const normalizedCurrent = normalizeText(currentQuestion)
+  const items = [...(history || [])]
+  if (items.length && items.at(-1)?.role === 'user' && normalizeText(items.at(-1)?.content) === normalizedCurrent) {
+    return items.slice(0, -1)
+  }
+  return items
+}
+
+function normalizeText(text) {
+  return String(text || '').trim().replace(/\s+/g, ' ').toLowerCase()
+}
+
+// docx 기반으로 업데이트된 단계 매칭 규칙
+const STAGE_MATCH_RULES = [
+  {
+    stageNumber: 1,
+    weight: 8,
+    patterns: [/회원가입|로그인|관리자\s*테스트|규칙|서명|o\/x|ox|보안\s*규정|행동\s*강령|접근\s*테스트|아니오|예예/i]
+  },
+  {
+    stageNumber: 2,
+    weight: 8,
+    patterns: [/wesen|개체|아카이브|archive|업무\s*요청|운송|수송|캐나다|found|아이콘|핀|4마리|4개/i]
+  },
+  {
+    stageNumber: 3,
+    weight: 8,
+    patterns: [/큐브|정육면체|cube|긴급|파란\s*버튼|4초|hold|마주\s*보|반대\s*편|dr\.g|회사소개|trace|observation|볼드/i]
+  },
+  {
+    stageNumber: 4,
+    weight: 8,
+    patterns: [/뉴스|기사|사진|회색\s*박스|드래그|숨겨진|로마\s*숫자|raomtni|error|signal|source|pattern|network/i]
+  },
+  {
+    stageNumber: 5,
+    weight: 8,
+    patterns: [/미로|마우스|벽|시작점|완주|클리어|엔딩|영상|암호\s*입력|의문의\s*페이지/i]
+  }
+]
+
+
+function httpError(statusCode, message) {
+  const error = new Error(message)
+  error.statusCode = statusCode
+  return error
+}
+
+const requestBuckets = new Map()
+
+function rateLimit(req, res, next) {
+  if (req.path === '/health') {
+    next()
+    return
+  }
+
+  const now = Date.now()
+  const key = req.ip || req.headers['x-forwarded-for'] || 'unknown'
+  const bucket = requestBuckets.get(key) || { count: 0, resetAt: now + RATE_LIMIT_WINDOW_MS }
+
+  if (now > bucket.resetAt) {
+    bucket.count = 0
+    bucket.resetAt = now + RATE_LIMIT_WINDOW_MS
+  }
+
+  bucket.count += 1
+  requestBuckets.set(key, bucket)
+
+  if (bucket.count > RATE_LIMIT_MAX) {
+    res.status(429).json({ error: '요청이 너무 많습니다. 잠시 후 다시 시도해주세요.' })
+    return
+  }
+
+  next()
+}
+
+// Firebase 없을 때 사용하는 로컬 fallback 지식베이스
+const SEED_KNOWLEDGE = {
+  egcompany: {
+    gameId: 'egcompany',
+    title: 'EGCompany',
+    stages: [
+      {
+        number: 1, title: '1번 업무: 관리자 인증', difficulty: '쉬움',
+        keywords: ['회원가입', '로그인', '관리자 테스트', '규칙', '서명', 'O/X', 'OX', '보안 규정', '행동 강령', '아니오', '예'],
+        content: '[목표] 관리자 접근 테스트를 통과해 보안 터미널로 진입하기.\n[정답] 1번: 아니오, 2~5번: 예.',
+        hints: { 1: '규칙 페이지 Notice 영역의 서명 버튼을 눌러 관리자 테스트를 시작하세요.', 2: '보안팀이 허가하지 않은 행동을 묻는 1번 문항만 아니오, 나머지는 예입니다.', 3: '정답 순서: 아니오, 예, 예, 예, 예. 통과하면 보안 터미널로 이동합니다.' }
+      },
+      {
+        number: 2, title: '2번 업무: 개체 수송 업무', difficulty: '보통',
+        keywords: ['WESEN', '아카이브', 'ARCHIVE', '개체', '4개', '캐나다', '수송', 'FoUnd', '아이콘', '핀'],
+        content: '[목표] 캐나다 지부 개체 4마리 선택.\n[정답] WESEN-783, WESEN-106, WESEN-9428, WESEN-0101.',
+        hints: { 1: '수송팀 메일 확인 후 아카이브 탭으로 이동해 각 개체의 현재 위치를 확인하세요.', 2: '8개 개체 중 현재 위치가 캐나다인 개체 4마리만 선택해야 합니다.', 3: '캐나다 위치 개체: WESEN-783, WESEN-106, WESEN-9428, WESEN-0101. 아이콘 핀을 클릭해 제출하세요.' }
+      },
+      {
+        number: 3, title: '3번 업무: 긴급 탈출 대응 (정육면체)', difficulty: '어려움',
+        keywords: ['정육면체', '큐브', 'Trace', 'Observation', '반대', '4초', 'Dr.G', '회사소개', '볼드'],
+        content: '[목표] Observation 반대편 면 Trace를 4초 이상 클릭.\n[단서] "진실은 언제나 관찰의 반대편에 있다."',
+        hints: { 1: '긴급 메일 하단 파란 버튼을 눌러 정육면체 팝업을 열고 Dr.G 단서를 확인하세요.', 2: '회사소개 탭에서 Dr.G 소개글 맨 아래 볼드 문구를 찾아보세요.', 3: 'Observation의 정반대 면인 Trace를 4초 이상 누르고 있으면 통과됩니다.' }
+      },
+      {
+        number: 4, title: '4번 업무: 암호 해독', difficulty: '어려움',
+        keywords: ['뉴스', '기사', '사진', '회색 박스', '드래그', '로마 숫자', 'RAOMTNI'],
+        content: '[목표] 숨겨진 문구에서 로마 숫자 규칙으로 암호 해독.\n[정답] RAOMTNI.',
+        hints: { 1: '의문의 메일 첨부 사진이 뉴스 탭 마지막 기사 사진과 동일합니다.', 2: '해당 뉴스 상세 페이지 하단 회색 박스를 드래그하면 숨겨진 문구가 보입니다.', 3: '대문자 단어 뒤 로마 숫자 위치의 글자를 순서대로 나열하면 RAOMTNI입니다.' }
+      },
+      {
+        number: 5, title: '5번 업무: 엔딩 — 마우스 미로', difficulty: '보통',
+        keywords: ['미로', '마우스', '벽', '시작점', '완주', '엔딩', '영상', '의문의 페이지'],
+        content: '[목표] 마우스 미로 완주 후 엔딩 영상 시청.',
+        hints: { 1: '암호 입력 성공 후 자동 이동한 페이지에서 마우스를 조심스럽게 움직이세요.', 2: '벽에 닿으면 시작점으로 돌아갑니다. 천천히 이동하세요.', 3: '미로 끝까지 완주하면 엔딩 영상이 재생되며 클리어됩니다.' }
+      }
+    ]
+  }
+}

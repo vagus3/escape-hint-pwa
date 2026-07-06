@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 860">
+  <defs>
+    <linearGradient id="room" x1="0" y1="0" x2="0" y2="860">
+      <stop stop-color="#3a250f"/>
+      <stop offset=".62" stop-color="#160d06"/>
+      <stop offset="1" stop-color="#050302"/>
+    </linearGradient>
+    <radialGradient id="lamp" cx="50%" cy="22%" r="40%">
+      <stop stop-color="#ffc35d" stop-opacity=".62"/>
+      <stop offset="1" stop-color="#ffc35d" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="640" height="860" fill="url(#room)"/>
+  <rect width="640" height="860" fill="url(#lamp)"/>
+  <path d="M84 182h472v520H84z" fill="#100904" opacity=".72"/>
+  <path d="M118 224h92v430h-92zm112 0h92v430h-92zm112 0h92v430h-92zm112 0h70v430h-70z" fill="#3b2410"/>
+  <path d="M118 302h406M118 402h406M118 502h406M118 602h406" stroke="#c08b42" stroke-width="8" opacity=".55"/>
+  <circle cx="320" cy="168" r="40" fill="#ffd07a" opacity=".9"/>
+  <path d="M0 742h640v118H0z" fill="#060302"/>
+</svg>

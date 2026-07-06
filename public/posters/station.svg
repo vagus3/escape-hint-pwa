@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 860">
+  <defs>
+    <linearGradient id="tunnel" x1="0" y1="0" x2="0" y2="860">
+      <stop stop-color="#12333a"/>
+      <stop offset=".5" stop-color="#081317"/>
+      <stop offset="1" stop-color="#020404"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="50%" cy="36%" r="42%">
+      <stop stop-color="#6ce6dd" stop-opacity=".5"/>
+      <stop offset="1" stop-color="#6ce6dd" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="640" height="860" fill="url(#tunnel)"/>
+  <rect width="640" height="860" fill="url(#glow)"/>
+  <path d="M118 236h404v448H118z" fill="#071014" opacity=".82"/>
+  <path d="M166 286h308v216H166z" fill="#14272d"/>
+  <path d="M178 314h284M178 374h284M178 434h284" stroke="#6ce6dd" stroke-width="6" opacity=".28"/>
+  <path d="M94 684h452" stroke="#9aa4a9" stroke-width="16" opacity=".5"/>
+  <path d="M160 742h320" stroke="#9aa4a9" stroke-width="10" opacity=".38"/>
+  <path d="M0 780h640v80H0z" fill="#020404"/>
+</svg>
