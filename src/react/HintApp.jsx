@@ -321,7 +321,7 @@ function PlayScreen({
   const examples = [
     'WESEN 개체는 어떤 걸 골라야 해?',
     '큐브에서 뭘 해야 하는지 모르겠어.',
-    'SCP 파일 화면에서 다음으로 뭘 눌러야 해?'
+    'WESEN 파일 화면에서 다음으로 뭘 눌러야 해?'
   ]
 
   return (

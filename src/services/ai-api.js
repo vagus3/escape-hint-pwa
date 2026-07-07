@@ -178,10 +178,10 @@ ${game?.title || 'EGCompany'}
 ${formatGameFlow(game)}
 
 [현재 담당 업무 구간]
-${formatStage(stage)}
+${formatStage(stage, hintLevel)}
 
-[단계별 안내 내용]
-${formatHints(stage?.hints)}
+[안내 가능한 내용 — 이 범위를 절대 넘지 마세요]
+${formatHints(stage?.hints, hintLevel)}
 
 [안내 수준]
 ${levelInstruction}
@@ -189,41 +189,48 @@ ${levelInstruction}
 [규칙]
 1. 한국어로 3~5문장만 답변하세요.
 2. 최종 암호나 정답을 직접 말하지 마세요.
-3. 업무와 무관한 질문에는 "해당 업무 관련 문의만 처리 가능합니다"라고 하세요.
-4. 질문이 모호하면 언급된 화면 단서로 가장 가까운 업무 구간을 먼저 짚어주세요.
-5. 확실하지 않은 내용은 추측하지 말고 확인해야 할 위치를 안내하세요.`
+3. 위 [안내 가능한 내용]에 없는 풀이 정보를 지어내거나 앞질러 말하지 마세요.
+4. 업무와 전혀 관련 없는 질문(사적 대화, 다른 주제)일 때만 "해당 업무 관련 문의만 처리 가능합니다"라고 답하세요.
+5. '단계', '안내 수준' 같은 내부 표현이나 번호를 답변에 언급하지 마세요.
+6. 질문이 모호하면 언급된 화면 단서로 가장 가까운 업무 구간을 먼저 짚어주세요.
+7. 확실하지 않은 내용은 추측하지 말고 확인해야 할 위치를 안내하세요.`
 }
 
 function formatGameFlow(game) {
   const stages = Array.isArray(game?.stages) ? game.stages : []
   if (!stages.length) return '등록된 구간 정보가 없습니다. 사용자의 화면 단서를 기준으로 관찰할 위치를 안내하세요.'
 
+  // 풀이 지식(content)은 정답이 포함되어 있어 흐름 안내에서는 제외한다
   return stages
     .map((stage, index) => {
       const number = stage.number || stage.stageNumber || index + 1
       const title = stage.title || `${number}번 구간`
       const keywords = (stage.keywords || []).slice(0, 8).join(', ')
-      const summary = stage.content ? `\n   - 지식: ${String(stage.content).slice(0, 450)}` : ''
       const keywordLine = keywords ? `\n   - 단서어: ${keywords}` : ''
-      return `${number}. ${title}${keywordLine}${summary}`
+      return `${number}. ${title}${keywordLine}`
     })
     .join('\n')
 }
 
-function formatStage(stage) {
+function formatStage(stage, hintLevel) {
   if (!stage) return '선택된 문제가 없습니다.'
+  const contentBlock = hintLevel >= 3
+    ? `풀이 지식:\n${stage.content || '등록된 지식이 없습니다.'}`
+    : '풀이 지식: 아래 [안내 가능한 내용]만 참고해 안내하세요.'
   return `${stage.number || ''}번: ${stage.title || '제목 없음'}
 난이도: ${stage.difficulty || '보통'}
 키워드: ${(stage.keywords || []).join(', ') || '없음'}
-풀이 지식:
-${stage.content || '등록된 지식이 없습니다.'}`
+${contentBlock}`
 }
 
-function formatHints(hints) {
+function formatHints(hints, maxLevel = 3) {
   if (!hints || typeof hints !== 'object') return '없음'
-  return Object.entries(hints)
+  const entries = Object.entries(hints)
+    .filter(([level]) => Number(level) <= maxLevel)
     .sort(([a], [b]) => Number(a) - Number(b))
-    .map(([level, text]) => `- ${level}단계: ${text}`)
+  if (!entries.length) return '없음'
+  return entries
+    .map(([, text]) => `- ${text}`)
     .join('\n')
 }
 

@@ -296,7 +296,7 @@ async function askGroq({ payload, knowledge, stage, hintLevel }) {
 
 function buildSystemPrompt({ knowledge, stage, hintLevel }) {
   const levelInstruction = {
-    1: '안내 수준 1: 확인해야 할 위치나 방향만 알려주세요. 구체적인 풀이 방법, 암호, 최종 행동은 말하지 마세요.',
+    1: '안내 수준 1: 확인해야 할 위치나 방향만 알려주세요. 구체적인 풀이 방법, 조작 방법, 암호, 최종 행동은 말하지 마세요.',
     2: '안내 수준 2: 관련 단서를 구체화하세요. 마지막 행동이나 최종 입력값은 직원이 스스로 찾게 남겨두세요.',
     3: '안내 수준 3: 최종 행동 직전까지 안내하세요. 그래도 정확한 암호 문자열이나 최종 입력값은 직접 말하지 마세요.'
   }[hintLevel]
@@ -315,10 +315,10 @@ ${knowledge.title || 'EGCompany'}
 ${stage ? `${stage.number || ''}번 업무: ${stage.title || ''}` : '미확인 (질문을 기준으로 판단)'}
 
 [해당 구간 업무 정보]
-${stage?.content || '등록된 구간 정보가 없습니다.'}
+${formatStageContent(stage?.content, hintLevel)}
 
-[단계별 안내 내용]
-${formatHints(stage?.hints)}
+[안내 가능한 내용 — 이 범위를 절대 넘지 마세요]
+${formatHints(stage?.hints, hintLevel)}
 
 [안내 수준]
 ${levelInstruction}
@@ -326,17 +326,30 @@ ${levelInstruction}
 [반드시 지킬 규칙]
 1. 한국어로 답변하세요.
 2. 최종 암호나 정답을 직접 제공하지 마세요.
-3. 3~5문장으로 간결하게 안내하세요.
-4. 업무와 무관한 질문에는 "해당 업무 관련 문의만 처리 가능합니다"라고 하세요.
-5. 확신할 수 없는 내용은 추측하지 말고 확인해야 할 위치를 안내하세요.
-6. 질문이 모호하면 언급된 화면 단서로 가장 가까운 업무 구간을 먼저 짚어주세요.`
+3. 위 [안내 가능한 내용]에 없는 풀이 정보를 지어내거나 앞질러 말하지 마세요.
+4. 3~5문장으로 간결하게 안내하세요.
+5. 업무와 전혀 관련 없는 질문(사적 대화, 다른 주제)일 때만 "해당 업무 관련 문의만 처리 가능합니다"라고 답하세요. 업무 질문에는 이 문구를 쓰지 마세요.
+6. '단계', '안내 수준' 같은 내부 표현이나 번호를 답변에 언급하지 마세요.
+7. 확신할 수 없는 내용은 추측하지 말고 확인해야 할 위치를 안내하세요.
+8. 질문이 모호하면 언급된 화면 단서로 가장 가까운 업무 구간을 먼저 짚어주세요.`
 }
 
-function formatHints(hints) {
+// 레벨 3 미만에서는 풀이 정보([목표]/[정답])가 담긴 content를 프롬프트에서 제외해
+// 모델이 낮은 단계에서 정답을 노출할 수 없게 한다
+function formatStageContent(content, hintLevel) {
+  if (hintLevel >= 3) return content || '등록된 구간 정보가 없습니다.'
+  return '아래 [안내 가능한 내용]만 참고해 안내하세요.'
+}
+
+// 현재 hintLevel 이하의 힌트만 프롬프트에 포함한다
+function formatHints(hints, maxLevel = 3) {
   if (!hints || typeof hints !== 'object') return '없음'
-  return Object.entries(hints)
+  const entries = Object.entries(hints)
+    .filter(([level]) => Number(level) <= maxLevel)
     .sort(([a], [b]) => Number(a) - Number(b))
-    .map(([level, text]) => `- ${level}단계: ${text}`)
+  if (!entries.length) return '없음'
+  return entries
+    .map(([level, text]) => `- ${text}`)
     .join('\n')
 }
 

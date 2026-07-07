@@ -28,3 +28,4 @@ npm-debug.log*
 # Editor
 .vscode/
 .idea/
+.vercel
