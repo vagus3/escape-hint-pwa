@@ -318,11 +318,17 @@ function PlayScreen({
   onQuestionChange,
   onSubmit
 }) {
+  const inputRef = useRef(null)
   const examples = [
     'WESEN 개체는 어떤 걸 골라야 해?',
     '큐브에서 뭘 해야 하는지 모르겠어.',
     'WESEN 파일 화면에서 다음으로 뭘 눌러야 해?'
   ]
+
+  function fillExample(item) {
+    onQuestionChange(item)
+    inputRef.current?.focus()
+  }
 
   return (
     <section className="screen play-screen">
@@ -349,7 +355,7 @@ function PlayScreen({
             <div className="question-examples">
               <span>질문 예시</span>
               {examples.map(item => (
-                <button key={item} type="button" onClick={event => onSubmit(event, item)}>{item}</button>
+                <button key={item} type="button" onClick={() => fillExample(item)}>{item}</button>
               ))}
             </div>
           </>
@@ -368,6 +374,7 @@ function PlayScreen({
 
       <form className="composer" onSubmit={onSubmit}>
         <input
+          ref={inputRef}
           value={question}
           onChange={event => onQuestionChange(event.target.value)}
           placeholder="현재 화면에서 막힌 내용을 입력하세요..."
