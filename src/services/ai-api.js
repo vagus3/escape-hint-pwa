@@ -21,6 +21,26 @@ if (typeof window !== 'undefined') {
   if (emailParam) setUserEmail(emailParam)
 }
 
+let warmUpPromise = null
+
+// Render 등 유휴 시 슬립되는 플랫폼은 첫 요청에 콜드 스타트(약 10~15초)가 걸린다.
+// 앱 진입 시점(질문을 입력하기 전)에 미리 /health를 호출해 서버를 깨워두면
+// 실제 힌트 요청 시 대기 시간을 없앨 수 있다. 실패해도 무시 — 실제 요청이 재시도 역할을 한다.
+export function warmUpAiServer() {
+  if (!AI_API_URL) return null
+  if (warmUpPromise) return warmUpPromise
+
+  warmUpPromise = fetch(`${AI_API_URL.replace(/\/$/, '')}/health`, {
+    signal: AbortSignal.timeout(30_000)
+  })
+    .catch(() => {})
+    .finally(() => {
+      warmUpPromise = null
+    })
+
+  return warmUpPromise
+}
+
 export async function requestHint({ game, question, history, signal }) {
   const matchedStage = inferRelevantStage({ game, question, history })
 

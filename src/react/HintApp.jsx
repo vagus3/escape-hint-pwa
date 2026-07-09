@@ -26,7 +26,7 @@ import {
   UsersRound
 } from 'lucide-react'
 import { listGames } from '../services/games.js'
-import { requestHint, getUserEmail, setUserEmail } from '../services/ai-api.js'
+import { requestHint, getUserEmail, setUserEmail, warmUpAiServer } from '../services/ai-api.js'
 
 const NAV_ITEMS = [
   { id: 'home', label: '홈', Icon: Home },
@@ -75,6 +75,8 @@ export function HintApp() {
   const messages = messagesByGame[gameKey] || []
 
   useEffect(() => {
+    // 링크 접속 즉시 AI 서버를 깨워둬서, 실제로 질문할 때는 콜드 스타트 대기가 없게 한다
+    warmUpAiServer()
     listGames().then(items => {
       setGames(items)
       setSelectedGameId(items[0]?.id || '')
@@ -92,6 +94,7 @@ export function HintApp() {
 
   function openPlay(game = selectedGame) {
     if (!game) return
+    warmUpAiServer()
     setSelectedGameId(game.id)
     setMode('play')
   }
