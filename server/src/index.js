@@ -254,10 +254,22 @@ function tokenize(text) {
     .filter(token => token.length > 1 || /^[0-9]+$/.test(token))
 }
 
+// 작은 모델(llama-3.1-8b)은 "질문 언어에 맞춰 답하라"는 지시를 스스로 판단하게 하면
+// 특히 영어에서 잘 안 지켜서(프롬프트 대부분이 한국어라 신호가 약함), 서버가 직접
+// 감지해 답변 언어를 명시적으로 지정한다
+function detectQuestionLanguage(text) {
+  const value = String(text || '')
+  if (/[가-힣]/.test(value)) return 'Korean (한국어)'
+  if (/[぀-ヿ]/.test(value)) return 'Japanese (日本語)'
+  if (/[一-鿿]/.test(value)) return 'Chinese (中文)'
+  if (/[a-zA-Z]/.test(value)) return 'English'
+  return 'Korean (한국어)'
+}
+
 async function askGroq({ payload, knowledge, stage, hintLevel }) {
   if (!GROQ_API_KEY) throw httpError(500, 'GROQ_API_KEY가 설정되지 않았습니다.')
 
-  const system = buildSystemPrompt({ knowledge, stage, hintLevel })
+  const system = buildSystemPrompt({ knowledge, stage, hintLevel, replyLanguage: detectQuestionLanguage(payload.question) })
   const messages = [
     { role: 'system', content: system },
     ...getPromptHistory(payload.history, payload.question).slice(-6),
@@ -290,7 +302,7 @@ async function askGroq({ payload, knowledge, stage, hintLevel }) {
   return answer
 }
 
-function buildSystemPrompt({ knowledge, stage, hintLevel }) {
+function buildSystemPrompt({ knowledge, stage, hintLevel, replyLanguage }) {
   const levelInstruction = {
     1: '안내 수준 1: 확인해야 할 위치나 방향만 알려주세요. 구체적인 풀이 방법, 조작 방법, 암호, 최종 행동은 말하지 마세요.',
     2: '안내 수준 2: 관련 단서를 구체화하세요. 마지막 행동이나 최종 입력값은 직원이 스스로 찾게 남겨두세요.',
@@ -313,12 +325,15 @@ ${formatStageOverview(knowledge.stages)}`
 
   const hintsBlock = stage ? formatHints(stage.hints, hintLevel) : '없음 (업무가 아직 특정되지 않음)'
 
-  return `당신은 EGCompany 시설의 익명 보안 관리 담당자입니다.
+  return `[IMPORTANT — response language]
+Write your entire answer in ${replyLanguage}. Every other section below is written in Korean as source material only — translate it, do not quote it verbatim in Korean.
+
+당신은 EGCompany 시설의 익명 보안 관리 담당자입니다.
 상대방은 오늘 처음 출근한 신입 보안 관리자로, 업무를 진행하다 막혀 도움을 요청하고 있습니다.
 시설 내부 직원답게 차분하고 정확한 말투로 안내하세요.
 
-[절대 사용 금지 표현] 방탈출, 게임, 퍼즐, 정답, 힌트
-대신 다음처럼 표현하세요: '업무 절차', '시스템 안내', '확인 사항', '다음 단계'
+[절대 사용 금지 표현] 방탈출, 게임, 퍼즐, 정답, 힌트 — 답변을 어떤 언어로 하든 이 단어들의 그 언어 번역어도 금지입니다.
+대신 다음 개념으로 표현하세요 (답변 언어로 번역해서): '업무 절차', '시스템 안내', '확인 사항', '다음 단계'
 
 [시설]
 ${knowledge.title || 'EGCompany'}
@@ -336,11 +351,11 @@ ${hintsBlock}
 ${levelInstruction}
 
 [반드시 지킬 규칙]
-1. 한국어로 답변하세요.
+1. 반드시 ${replyLanguage}로 답변하세요. 위 정보가 한국어로 되어 있어도 그대로 인용하지 말고 번역해서 작성하세요.
 2. 최종 암호나 정답을 직접 제공하지 마세요.
 3. 주어진 정보에 없는 풀이 내용을 지어내거나 앞질러 말하지 마세요.
 4. 3~5문장으로 간결하게 안내하세요.
-5. 업무와 전혀 관련 없는 질문(사적 대화, 다른 주제)일 때만 "해당 업무 관련 문의만 처리 가능합니다"라고 답하세요. 업무 질문에는 이 문구를 쓰지 마세요.
+5. 업무와 전혀 관련 없는 질문(사적 대화, 다른 주제)일 때만 "해당 업무 관련 문의만 처리 가능합니다"(답변 언어로 번역)라고 답하세요. 업무 질문에는 이 문구를 쓰지 마세요.
 6. '단계', '안내 수준' 같은 내부 표현이나 번호를 답변에 언급하지 마세요.
 7. 확신할 수 없는 내용은 추측하지 말고 확인해야 할 위치를 안내하세요.
 8. 질문이 모호하면 언급된 화면 단서로 가장 가까운 업무 구간을 먼저 짚어주세요.`
