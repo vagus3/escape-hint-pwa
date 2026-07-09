@@ -379,15 +379,23 @@ function formatHints(hints, maxLevel = 3) {
 }
 
 function inferRelevantStage(stages, question, history = []) {
-  const currentMatch = rankStages(stages, question)[0]
-  if (currentMatch?.score > 0) return currentMatch.stage
+  const currentMatch = pickConfidentStage(rankStages(stages, question))
+  if (currentMatch) return currentMatch
 
   const recentUserText = getPreviousUserTurns(history, question)
     .slice(-2)
     .map(item => item.content)
     .join(' ')
-  const contextMatch = rankStages(stages, `${question} ${recentUserText}`.trim())[0]
-  return contextMatch?.score > 0 ? contextMatch.stage : null
+  return pickConfidentStage(rankStages(stages, `${question} ${recentUserText}`.trim()))
+}
+
+// 최고 점수가 0점이거나, 1위와 2위가 동점이면(=배열 순서에 따라 우연히 앞선 스테이지가
+// 뽑힌 것일 뿐 근거가 명확하지 않음) 억지로 하나를 고르지 않고 null(미확정)을 반환한다
+function pickConfidentStage(ranked) {
+  const [first, second] = ranked
+  if (!first || first.score <= 0) return null
+  if (second && second.score === first.score) return null
+  return first.stage
 }
 
 function rankStages(stages, query) {
@@ -408,14 +416,36 @@ function scoreStage(stage, tokens, query) {
     ...(stage.keywords || [])
   ].map(value => String(value || '').toLowerCase())
 
+  // "정육면체가", "미로를"처럼 키워드/제목 단어에 조사가 바로 붙는 경우
+  // haystack.includes(token) 방향만으로는 못 잡는다. keywords/제목만
+  // 단어 단위로 쪼개 token.startsWith(word)로도 추가 확인한다
+  // (content는 일반 서술문이라 단어 단위로 쪼개면 다른 스테이지와
+  //  겹치는 흔한 단어가 너무 많아져 노이즈가 커지므로 제외)
+  const keywordWords = new Set()
+  for (const value of [title, ...(stage.keywords || [])]) {
+    for (const word of String(value || '').toLowerCase().split(/\s+/)) {
+      if (word.length > 1) keywordWords.add(word)
+    }
+  }
+
   let score = 0
   if (hasStageNumberSignal(query, stage.number)) score += 30
 
   for (const token of tokens) {
+    let matched = false
     for (const haystack of haystacks) {
       if (haystack.includes(token)) {
         score += haystack === title ? 2 : 1
+        matched = true
         break
+      }
+    }
+    if (!matched) {
+      for (const word of keywordWords) {
+        if (token.startsWith(word)) {
+          score += 1
+          break
+        }
       }
     }
   }
@@ -469,31 +499,33 @@ function normalizeText(text) {
 }
 
 // docx 기반으로 업데이트된 단계 매칭 규칙
+// 게임이 실제로 쓰는 단어(정육면체, WESEN 등) 외에, 사용자가 자기 표현으로 바꿔 말하는
+// 흔한 동의어/의역도 추가로 인식하도록 확장했다 (예: 큐브 → "상자", "네모난 거")
 const STAGE_MATCH_RULES = [
   {
     stageNumber: 1,
     weight: 8,
-    patterns: [/회원가입|로그인|관리자\s*테스트|규칙|서명|o\/x|ox|보안\s*규정|행동\s*강령|접근\s*테스트|아니오|예예/i]
+    patterns: [/회원가입|가입|계정\s*생성|로그인|관리자\s*테스트|테스트\s*문항|문항|규칙|서명|동의|o\/x|ox|오\s*엑스|보안\s*규정|행동\s*강령|접근\s*테스트|보안\s*터미널|터미널\s*진입|아니오|예예/i]
   },
   {
     stageNumber: 2,
     weight: 8,
-    patterns: [/wesen|개체|아카이브|archive|업무\s*요청|운송|수송|캐나다|found|아이콘|핀|4마리|4개/i]
+    patterns: [/wesen|위센|웨센|개체|아카이브|archive|업무\s*요청|운송|수송|수송팀|캐나다|found|아이콘|핀|4마리|4개|개체\s*목록|개체\s*선택/i]
   },
   {
     stageNumber: 3,
     weight: 8,
-    patterns: [/큐브|정육면체|cube|긴급|파란\s*버튼|4초|hold|마주\s*보|반대\s*편|dr\.g|회사소개|trace|observation|볼드/i]
+    patterns: [/큐브|정육면체|cube|상자|박스|네모|긴급|파란\s*버튼|4초|hold|홀드|길게\s*누르|누르고\s*있|회전|돌리|마주\s*보|반대\s*편|dr\.?g|닥터\s*지|박사|회사소개|trace|observation|볼드/i]
   },
   {
     stageNumber: 4,
     weight: 8,
-    patterns: [/뉴스|기사|사진|회색\s*박스|드래그|숨겨진|로마\s*숫자|raomtni|error|signal|source|pattern|network/i]
+    patterns: [/뉴스|기사|사진|이미지|썸네일|회색\s*박스|드래그|숨겨진|로마\s*숫자|raomtni|error|signal|source|pattern|network|암호\s*해독|코드\s*해독|글자\s*조합/i]
   },
   {
     stageNumber: 5,
     weight: 8,
-    patterns: [/미로|마우스|벽|시작점|완주|클리어|엔딩|영상|암호\s*입력|의문의\s*페이지/i]
+    patterns: [/stop|s\s*t\s*o\s*p|알파벳|글자\s*찾기|순서대로|숨겨진\s*글자|클리어|엔딩|의문의\s*페이지/i]
   }
 ]
 
@@ -540,33 +572,33 @@ const SEED_KNOWLEDGE = {
     stages: [
       {
         number: 1, title: '1번 업무: 관리자 인증', difficulty: '쉬움',
-        keywords: ['회원가입', '로그인', '관리자 테스트', '규칙', '서명', 'O/X', 'OX', '보안 규정', '행동 강령', '아니오', '예'],
+        keywords: ['회원가입', '가입', '계정', '로그인', '관리자 테스트', '테스트 문항', '문항', '규칙', '서명', '동의', 'O/X', 'OX', '오엑스', '보안 규정', '행동 강령', '접근 테스트', '보안 터미널', '터미널', '아니오', '예'],
         content: '[목표] 관리자 접근 테스트를 통과해 보안 터미널로 진입하기.\n[정답] 1번: 아니오, 2~5번: 예.',
         hints: { 1: '규칙 페이지 Notice 영역의 서명 버튼을 눌러 관리자 테스트를 시작하세요.', 2: '보안팀이 허가하지 않은 행동을 묻는 1번 문항만 아니오, 나머지는 예입니다.', 3: '정답 순서: 아니오, 예, 예, 예, 예. 통과하면 보안 터미널로 이동합니다.' }
       },
       {
         number: 2, title: '2번 업무: 개체 수송 업무', difficulty: '보통',
-        keywords: ['WESEN', '아카이브', 'ARCHIVE', '개체', '4개', '캐나다', '수송', 'FoUnd', '아이콘', '핀'],
+        keywords: ['WESEN', '위센', '웨센', '아카이브', 'ARCHIVE', '개체', '개체 목록', '4개', '4마리', '캐나다', '수송', '수송팀', 'FoUnd', '아이콘', '핀', '선택'],
         content: '[목표] 캐나다 지부 개체 4마리 선택.\n[정답] WESEN-783, WESEN-106, WESEN-9428, WESEN-0101.',
         hints: { 1: '수송팀 메일 확인 후 아카이브 탭으로 이동해 각 개체의 현재 위치를 확인하세요.', 2: '8개 개체 중 현재 위치가 캐나다인 개체 4마리만 선택해야 합니다.', 3: '캐나다 위치 개체: WESEN-783, WESEN-106, WESEN-9428, WESEN-0101. 아이콘 핀을 클릭해 제출하세요.' }
       },
       {
         number: 3, title: '3번 업무: 긴급 탈출 대응 (정육면체)', difficulty: '어려움',
-        keywords: ['정육면체', '큐브', 'Trace', 'Observation', '반대', '4초', 'Dr.G', '회사소개', '볼드'],
+        keywords: ['정육면체', '큐브', '상자', '박스', '네모', '회전', '돌리기', '길게 누르기', '홀드', 'Trace', 'Observation', '반대', '반대편', '4초', 'Dr.G', '닥터지', '박사', '회사소개', '볼드'],
         content: '[목표] Observation 반대편 면 Trace를 4초 이상 클릭.\n[단서] "진실은 언제나 관찰의 반대편에 있다."',
         hints: { 1: '긴급 메일 하단 파란 버튼을 눌러 정육면체 팝업을 열고 Dr.G 단서를 확인하세요.', 2: '회사소개 탭에서 Dr.G 소개글 맨 아래 볼드 문구를 찾아보세요.', 3: 'Observation의 정반대 면인 Trace를 4초 이상 누르고 있으면 통과됩니다.' }
       },
       {
         number: 4, title: '4번 업무: 암호 해독', difficulty: '어려움',
-        keywords: ['뉴스', '기사', '사진', '회색 박스', '드래그', '로마 숫자', 'RAOMTNI'],
+        keywords: ['뉴스', '기사', '사진', '이미지', '썸네일', '회색 박스', '드래그', '로마 숫자', '암호 해독', '코드', 'RAOMTNI'],
         content: '[목표] 숨겨진 문구에서 로마 숫자 규칙으로 암호 해독.\n[정답] RAOMTNI.',
         hints: { 1: '의문의 메일 첨부 사진이 뉴스 탭 마지막 기사 사진과 동일합니다.', 2: '해당 뉴스 상세 페이지 하단 회색 박스를 드래그하면 숨겨진 문구가 보입니다.', 3: '대문자 단어 뒤 로마 숫자 위치의 글자를 순서대로 나열하면 RAOMTNI입니다.' }
       },
       {
-        number: 5, title: '5번 업무: 엔딩 — 마우스 미로', difficulty: '보통',
-        keywords: ['미로', '마우스', '벽', '시작점', '완주', '엔딩', '영상', '의문의 페이지'],
-        content: '[목표] 마우스 미로 완주 후 엔딩 영상 시청.',
-        hints: { 1: '암호 입력 성공 후 자동 이동한 페이지에서 마우스를 조심스럽게 움직이세요.', 2: '벽에 닿으면 시작점으로 돌아갑니다. 천천히 이동하세요.', 3: '미로 끝까지 완주하면 엔딩 영상이 재생되며 클리어됩니다.' }
+        number: 5, title: '5번 업무: 엔딩 — 알파벳 순서 클릭', difficulty: '보통',
+        keywords: ['암호 입력', 'STOP', 'S T O P', '알파벳', '글자 찾기', '순서', '의문의 페이지', '숨겨진 글자', '엔딩', '영상', '클리어'],
+        content: '[목표] 의문의 페이지 화면 곳곳에 흩어진 S, T, O, P 글자를 찾아 반드시 이 순서대로 클릭하기.\n[정답] S → T → O → P 순서 고정. 순서가 틀리면 통과되지 않음.',
+        hints: { 1: '암호 입력에 성공하면 이동하는 새 화면을 잘 살펴보세요. 화면 곳곳에 평소와 다른 글자가 숨어 있습니다.', 2: '화면에 흩어진 알파벳 중 S, T, O, P 네 글자를 찾아보세요. 순서대로 눌러야 하는 장치입니다.', 3: 'S → T → O → P 순서대로 정확히 클릭하면 통과되어 엔딩 영상이 재생됩니다.' }
       }
     ]
   }
