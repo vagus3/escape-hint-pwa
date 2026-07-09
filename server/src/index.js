@@ -60,7 +60,7 @@ app.post('/api/hints', async (req, res) => {
   try {
     const payload = validateHintRequest(req.body)
     const knowledge = await loadGameKnowledge(payload.gameId)
-    const stage = findStage(knowledge, payload.stageNumber, payload.question, payload.history)
+    const stage = findStage(knowledge, payload.question, payload.history)
     const hintLevel = decideHintLevel(knowledge, stage, payload.question, payload.history, payload.maxHintLevel)
     const answer = await askGroq({ payload, knowledge, stage, hintLevel })
 
@@ -151,13 +151,11 @@ function validateHintRequest(body) {
   const gameId = String(body?.gameId || '').trim()
   const question = String(body?.question || '').trim()
   const history = Array.isArray(body?.history) ? body.history : []
-  const stageNumber = body?.stageNumber == null ? null : Number(body.stageNumber)
   const maxHintLevel = Math.min(Number(body?.maxHintLevel || 3), 3)
   const userEmail = body?.userEmail ? String(body.userEmail).trim().toLowerCase() : null
 
   if (!gameId) throw httpError(400, 'gameId가 필요합니다.')
   if (!question) throw httpError(400, 'question이 필요합니다.')
-  if (Number.isNaN(stageNumber)) throw httpError(400, 'stageNumber 형식이 올바르지 않습니다.')
 
   return {
     gameId,
@@ -169,7 +167,6 @@ function validateHintRequest(body) {
         content: String(item.content || '').slice(0, 800)
       }))
       .slice(-8),
-    stageNumber,
     maxHintLevel,
     userEmail
   }
@@ -189,12 +186,9 @@ async function loadGameKnowledge(gameId) {
   return fallback
 }
 
-function findStage(knowledge, stageNumber, question, history) {
+function findStage(knowledge, question, history) {
   const stages = Array.isArray(knowledge.stages) ? knowledge.stages : []
   if (!stages.length) return null
-  if (stageNumber != null) {
-    return stages.find(stage => Number(stage.number) === Number(stageNumber)) || inferRelevantStage(stages, question, history)
-  }
   return inferRelevantStage(stages, question, history)
 }
 
@@ -255,7 +249,9 @@ function tokenize(text) {
     .toLowerCase()
     .replace(/[^가-힣a-z0-9\s]/g, ' ')
     .split(/\s+/)
-    .filter(token => token.length > 1)
+    // 한글자 토큰은 대부분 노이즈지만, "2단계"처럼 숫자 하나로 스테이지를 지칭하는
+    // 경우가 있어 숫자 토큰만 예외적으로 살려둔다
+    .filter(token => token.length > 1 || /^[0-9]+$/.test(token))
 }
 
 async function askGroq({ payload, knowledge, stage, hintLevel }) {
@@ -301,6 +297,22 @@ function buildSystemPrompt({ knowledge, stage, hintLevel }) {
     3: '안내 수준 3: 최종 행동 직전까지 안내하세요. 그래도 정확한 암호 문자열이나 최종 입력값은 직접 말하지 마세요.'
   }[hintLevel]
 
+  const currentStageBlock = stage
+    ? `${stage.number || ''}번 업무: ${stage.title || ''}`
+    : '미확인 — 질문만으로는 어느 업무인지 아직 확정하지 못했습니다.'
+
+  // 스테이지 매칭에 실패했을 때도 LLM이 완전히 맨손이 되지 않도록,
+  // 정답/풀이는 빼고 전체 업무 목록(제목+단서어)만 넘겨 스스로 가장 가까운 업무를 짚거나
+  // 되물을 수 있게 한다
+  const stageInfoBlock = stage
+    ? formatStageContent(stage.content, hintLevel)
+    : `아래 [전체 업무 목록]을 참고해 질문 속 화면/단어와 가장 가까운 업무를 먼저 짚어 안내하세요. 정말 판단할 단서가 없으면 어느 화면(메일, 탭, 팝업 등)에 있는지 되물어보세요.
+
+[전체 업무 목록]
+${formatStageOverview(knowledge.stages)}`
+
+  const hintsBlock = stage ? formatHints(stage.hints, hintLevel) : '없음 (업무가 아직 특정되지 않음)'
+
   return `당신은 EGCompany 시설의 익명 보안 관리 담당자입니다.
 상대방은 오늘 처음 출근한 신입 보안 관리자로, 업무를 진행하다 막혀 도움을 요청하고 있습니다.
 시설 내부 직원답게 차분하고 정확한 말투로 안내하세요.
@@ -312,13 +324,13 @@ function buildSystemPrompt({ knowledge, stage, hintLevel }) {
 ${knowledge.title || 'EGCompany'}
 
 [현재 담당 업무 구간]
-${stage ? `${stage.number || ''}번 업무: ${stage.title || ''}` : '미확인 (질문을 기준으로 판단)'}
+${currentStageBlock}
 
 [해당 구간 업무 정보]
-${formatStageContent(stage?.content, hintLevel)}
+${stageInfoBlock}
 
 [안내 가능한 내용 — 이 범위를 절대 넘지 마세요]
-${formatHints(stage?.hints, hintLevel)}
+${hintsBlock}
 
 [안내 수준]
 ${levelInstruction}
@@ -326,7 +338,7 @@ ${levelInstruction}
 [반드시 지킬 규칙]
 1. 한국어로 답변하세요.
 2. 최종 암호나 정답을 직접 제공하지 마세요.
-3. 위 [안내 가능한 내용]에 없는 풀이 정보를 지어내거나 앞질러 말하지 마세요.
+3. 주어진 정보에 없는 풀이 내용을 지어내거나 앞질러 말하지 마세요.
 4. 3~5문장으로 간결하게 안내하세요.
 5. 업무와 전혀 관련 없는 질문(사적 대화, 다른 주제)일 때만 "해당 업무 관련 문의만 처리 가능합니다"라고 답하세요. 업무 질문에는 이 문구를 쓰지 마세요.
 6. '단계', '안내 수준' 같은 내부 표현이나 번호를 답변에 언급하지 마세요.
@@ -339,6 +351,19 @@ ${levelInstruction}
 function formatStageContent(content, hintLevel) {
   if (hintLevel >= 3) return content || '등록된 구간 정보가 없습니다.'
   return '아래 [안내 가능한 내용]만 참고해 안내하세요.'
+}
+
+// 정답/풀이 없이 제목과 단서어만 노출하는 전체 업무 개요 (라우팅 실패 시 폴백용)
+function formatStageOverview(stages) {
+  if (!Array.isArray(stages) || !stages.length) return '등록된 업무 목록이 없습니다.'
+  return stages
+    .slice()
+    .sort((a, b) => Number(a.number) - Number(b.number))
+    .map(s => {
+      const keywords = (s.keywords || []).slice(0, 6).join(', ')
+      return `${s.number}. ${s.title}${keywords ? ` (관련 단서: ${keywords})` : ''}`
+    })
+    .join('\n')
 }
 
 // 현재 hintLevel 이하의 힌트만 프롬프트에 포함한다
@@ -409,6 +434,7 @@ function hasStageNumberSignal(query, stageNumber) {
   const patterns = [
     new RegExp(`${escaped}\\s*번`, 'i'),
     new RegExp(`${escaped}\\s*번째`, 'i'),
+    new RegExp(`${escaped}\\s*단계`, 'i'),
     new RegExp(`stage\\s*${escaped}`, 'i'),
     new RegExp(`스테이지\\s*${escaped}`, 'i'),
     new RegExp(`문제\\s*${escaped}`, 'i')
