@@ -211,6 +211,14 @@ export function HintApp() {
 }
 
 function HomeScreen({ games, selectedGame, onDetail, onPlay }) {
+  const listRef = useRef(null)
+
+  useEffect(() => {
+    // 브라우저가 이전 방문의 가로 스크롤 위치를 복원해 EGCompany(맨 앞 카드)가
+    // 화면 밖으로 밀려나는 경우가 있어, 화면 진입 시 항상 맨 앞으로 되돌린다
+    listRef.current?.scrollTo({ left: 0, behavior: 'auto' })
+  }, [])
+
   return (
     <section className="screen has-bottom-nav">
       <header className="home-header">
@@ -235,7 +243,7 @@ function HomeScreen({ games, selectedGame, onDetail, onPlay }) {
       </div>
 
       <SectionTitle title="추천 방탈출" action="더보기" />
-      <div className="horizontal-list">
+      <div className="horizontal-list" ref={listRef}>
         {games.map(game => (
           <GameCard key={game.id} game={game} onClick={() => onDetail(game)} />
         ))}
