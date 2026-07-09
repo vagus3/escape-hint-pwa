@@ -208,9 +208,13 @@ function decideHintLevel(knowledge, stage, question, history, maxHintLevel) {
   let hintCount = 0
   let lastUserIsThisStage = false
 
-  for (const msg of items) {
+  for (let i = 0; i < items.length; i++) {
+    const msg = items[i]
     if (msg.role === 'user') {
-      const userStage = inferRelevantStage(stages, msg.content, [])
+      // 메시지 하나만 떼어놓고 판단하지 않고, 그 시점까지의 대화를 문맥으로 함께 준다.
+      // "그거 봤는데도 모르겠어요"처럼 키워드 없이 이어지는 자연스러운 후속 질문도
+      // 문맥(직전 사용자 발화)을 참고해야 같은 스테이지로 인식되어 카운트가 끊기지 않는다
+      const userStage = inferRelevantStage(stages, msg.content, items.slice(0, i))
       if (userStage !== null && Number(userStage.number) === Number(stage.number)) {
         lastUserIsThisStage = true
       } else {
