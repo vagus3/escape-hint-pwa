@@ -632,6 +632,10 @@ textarea { resize: vertical; min-height: 80px; }
   overflow-x: auto;
   padding-bottom: 8px;
   scroll-snap-type: x proximity;
+  /* games가 비동기로 로드되면서 맨 앞에 카드가 끼워질 때, 브라우저의 기본
+     스크롤 앵커링이 "보이던 위치를 유지"하려고 스크롤을 자동으로 밀어버려
+     EGCompany 카드가 화면 밖으로 벗어나는 문제가 있어 꺼둔다 */
+  overflow-anchor: none;
 }
 
 .horizontal-list.small {

@@ -214,10 +214,12 @@ function HomeScreen({ games, selectedGame, onDetail, onPlay }) {
   const listRef = useRef(null)
 
   useEffect(() => {
-    // 브라우저가 이전 방문의 가로 스크롤 위치를 복원해 EGCompany(맨 앞 카드)가
-    // 화면 밖으로 밀려나는 경우가 있어, 화면 진입 시 항상 맨 앞으로 되돌린다
+    // games는 처음엔 빈 배열이었다가 listGames() 완료 후 EGCompany 카드가 맨 앞에
+    // 끼워지는 방식이라, games가 바뀔 때마다(=카드가 새로 추가될 때마다) 다시
+    // 맨 앞으로 리셋해야 한다. 마운트 시 1회만 리셋하면 games 도착 이후의
+    // 스크롤 밀림을 못 잡는다.
     listRef.current?.scrollTo({ left: 0, behavior: 'auto' })
-  }, [])
+  }, [games])
 
   return (
     <section className="screen has-bottom-nav">
