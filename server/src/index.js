@@ -203,27 +203,23 @@ function decideHintLevel(knowledge, stage, question, history, maxHintLevel) {
     return Math.min(similar.length + 1, maxHintLevel, 3)
   }
 
-  // 같은 스테이지에 대한 어시스턴트 응답 횟수로 힌트 단계 결정
-  // → 다른 스테이지 질문 후 돌아오면 해당 스테이지의 카운트만 사용
+  // 같은 문제에 대한 문의가 이어질수록 1→2→3단계로 올라간다.
+  // 과거 사용자 메시지가 어느 문제인지 확정되지 않으면("아직도 모르겠어요",
+  // "정답 알려줘" 등) 진행 중이던 문제의 연속으로 간주해 카운트를 유지하고,
+  // 다른 문제로 확실히 넘어간 경우에만 카운트를 처음부터 다시 센다.
   let hintCount = 0
-  let lastUserIsThisStage = false
+  let topicStageNumber = Number(stage.number)
 
   for (let i = 0; i < items.length; i++) {
     const msg = items[i]
     if (msg.role === 'user') {
-      // 메시지 하나만 떼어놓고 판단하지 않고, 그 시점까지의 대화를 문맥으로 함께 준다.
-      // "그거 봤는데도 모르겠어요"처럼 키워드 없이 이어지는 자연스러운 후속 질문도
-      // 문맥(직전 사용자 발화)을 참고해야 같은 스테이지로 인식되어 카운트가 끊기지 않는다
       const userStage = inferRelevantStage(stages, msg.content, items.slice(0, i))
-      if (userStage !== null && Number(userStage.number) === Number(stage.number)) {
-        lastUserIsThisStage = true
-      } else {
+      if (userStage !== null && Number(userStage.number) !== topicStageNumber) {
         hintCount = 0
-        lastUserIsThisStage = false
+        topicStageNumber = Number(userStage.number)
       }
     } else if (msg.role === 'assistant') {
-      if (lastUserIsThisStage) hintCount++
-      lastUserIsThisStage = false
+      if (topicStageNumber === Number(stage.number)) hintCount++
     }
   }
 
@@ -310,7 +306,7 @@ function buildSystemPrompt({ knowledge, stage, hintLevel, replyLanguage }) {
   const levelInstruction = {
     1: '안내 수준 1: 확인해야 할 위치나 방향만 알려주세요. 구체적인 풀이 방법, 조작 방법, 암호, 최종 행동은 말하지 마세요.',
     2: '안내 수준 2: 관련 단서를 구체화하세요. 마지막 행동이나 최종 입력값은 직원이 스스로 찾게 남겨두세요.',
-    3: '안내 수준 3: 최종 행동 직전까지 안내하세요. 그래도 정확한 암호 문자열이나 최종 입력값은 직접 말하지 마세요.'
+    3: '안내 수준 3: 이 직원은 같은 업무를 여러 번 문의했습니다. [안내 가능한 내용]의 마지막 항목을 기준으로, 무엇을 선택/입력/클릭해야 하는지 구체적인 값과 순서까지 숨기지 말고 정확하게 알려주세요. 이 수준에서는 안내 내용에 적힌 정보를 그대로 전달해야 합니다.'
   }[hintLevel]
 
   const currentStageBlock = stage
@@ -356,13 +352,14 @@ ${levelInstruction}
 
 [반드시 지킬 규칙]
 1. 반드시 ${replyLanguage}로 답변하세요. 위 정보가 한국어로 되어 있어도 그대로 인용하지 말고 번역해서 작성하세요.
-2. 최종 암호나 정답을 직접 제공하지 마세요.
+2. ${hintLevel >= 3 ? '[안내 가능한 내용]에 적힌 구체적인 값과 행동은 요청 시 그대로 알려주세요.' : '최종 암호나 정답, 최종 입력값은 아직 직접 제공하지 마세요.'}
 3. 주어진 정보에 없는 풀이 내용을 지어내거나 앞질러 말하지 마세요.
-4. 3~5문장으로 간결하게 안내하세요.
-5. 업무와 전혀 관련 없는 질문(사적 대화, 다른 주제)일 때만 "해당 업무 관련 문의만 처리 가능합니다"(답변 언어로 번역)라고 답하세요. 업무 질문에는 이 문구를 쓰지 마세요.
-6. '단계', '안내 수준' 같은 내부 표현이나 번호를 답변에 언급하지 마세요.
-7. 확신할 수 없는 내용은 추측하지 말고 확인해야 할 위치를 안내하세요.
-8. 질문이 모호하면 언급된 화면 단서로 가장 가까운 업무 구간을 먼저 짚어주세요.`
+4. 주어진 정보에 없는 조건을 만들어내지 마세요. 특히 "이전 업무를 먼저 완료해야 한다", "이전 내용을 먼저 문의해야 한다" 같은 선행 조건을 지어내서 안내를 거부하면 절대 안 됩니다.
+5. 3~5문장으로 간결하게 안내하세요.
+6. 업무와 전혀 관련 없는 질문(사적 대화, 다른 주제)일 때만 "해당 업무 관련 문의만 처리 가능합니다"(답변 언어로 번역)라고 답하세요. 업무 질문에는 이 문구를 쓰지 마세요.
+7. '단계', '안내 수준' 같은 내부 표현이나 번호를 답변에 언급하지 마세요.
+8. 확신할 수 없는 내용은 추측하지 말고 확인해야 할 위치를 안내하세요.
+9. 질문이 모호하면 언급된 화면 단서로 가장 가까운 업무 구간을 먼저 짚어주세요.`
 }
 
 // 레벨 3 미만에서는 풀이 정보([목표]/[정답])가 담긴 content를 프롬프트에서 제외해
